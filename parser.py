@@ -24,7 +24,7 @@ def get_number_list(node, name):
 def get_dest(node):
     val = node.attrib['dest']
     if val[-1] == '+':
-        return { 'dest': int(val[0::-2]), "append": True}
+        return { 'dest': int(val.replace('+', '')), "append": True}
     return { 'dest': int(val), "append": False}
 
 def get_input(node):
@@ -40,17 +40,21 @@ def get_val(node, name, default=None):
 class Expression:
     def __init__(self, node):
         self.repeat = get_attrib_yes_no(node, 'repeat', False)
+        # FIXME, do this
         self.noclean = get_number_list(node, 'noclean')
         self.trim = get_number_list(node, 'trim')
         self.clear =  get_attrib_yes_no(node, 'clear', False)
+
         self.regex = node.text
+        if self.regex is None or self.regex == '':
+            self.regex = '(.*)'
 
 class EmptyExpression:
     def __init__(self, regex):
         self.repeat = False
         self.noclean = []
         self.trim = []
-        self.clear =  []
+        self.clear = False
         self.regex = regex
         
 
@@ -63,7 +67,7 @@ class Regex:
         self.expression = EmptyExpression('(.*)')
         self.children = []
         for child in node:
-            if child.tag == 'expression' and child.text is not None:
+            if child.tag == 'expression':
                 self.expression = Expression(child)
             elif child.tag == 'RegExp':
                 self.children.append(Regex(child))
@@ -77,6 +81,26 @@ class Function:
         self.expression = None
         self.input = None
 
+
+class StrippedMatch(pcre.REMatch):
+    def __init__(self, pattern, string, pos, endpos, flags, trim=False):
+        super().__init__(pattern, string, pos, endpos, flags)
+        self.trim = trim
+    def groups(self, default=None):
+        retval = pcre.REMatch.groups(self, default)
+        if not self.trim:
+            return retval
+        return tuple(x.strip() if x is not None else x for x in retval)
+
+    def group(self, *args):
+        retval = pcre.REMatch.group(self, *args)
+        if not self.trim or retval is None:
+            return retval
+        if isinstance(retval, str):
+            return retval.strip()
+        else:
+            return tuple(x.strip() if x is not None else x for x in retval)
+
 def apply_regex_sub(expression, data, out):
     if data is not None and expression.regex is not None and out is not None:
         retval = ''
@@ -84,10 +108,14 @@ def apply_regex_sub(expression, data, out):
             matches = [pcre.search(expression.regex, data)]
         else:
             matches = pcre.finditer(expression.regex, data)
+        i = 1
         for match in matches:
             if match is None:
                 continue
+            if(i in expression.trim):
+                match = StrippedMatch(match.re, match.string, match.pos, match.endpos, match.flags, True)
             retval = retval + match.expand(out)
+            i+=1
         if retval != '':
             return retval
     return ''
@@ -106,7 +134,11 @@ def output_real(node, buffers):
     for child in node.children:
         buffers = output_real(child, buffers)
     if node.input is not None:
-        data = buffers[node.input]
+        if isinstance(node.input, int):
+            data = buffers[node.input]
+        else:
+            # FIXME handle configuration somehow
+            data = ''
         if node.expression is not None:
             data = apply_regex_sub(node.expression, data, node.output)
         data = apply_buffers(data, buffers)
@@ -128,16 +160,6 @@ def output(node, buffers):
             buffers = [None] * 21
             buffers[1] = data
     buffers = output_real(node, buffers)
-    # print(node.dest)
-
-    # for index, val in enumerate(buffers):
-    #     display = val
-    #     if display is not None and len(display) > 100:
-    #         display = display[:100]
-    #     print(str(index)+":" + str(display))
-
-
-
     return buffers[node.dest['dest']]
         
 
@@ -170,6 +192,8 @@ def main(argv):
         
     with open(input_file, 'r') as inp:
         htmldata = inp.read()
+        # pcre doesn't seem to be respecting the multiline flag, so join all the lines
+        htmldata = htmldata.replace('\n', '').replace('\r', '')
         buffers[1] = htmldata
         details = funcs['GetDetails']
         out = output(details, buffers)
